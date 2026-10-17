@@ -8,7 +8,7 @@
 #include <ESPAsyncWebServer.h>
 
 /* WiFi AP Credentials */
-const char* ssid = "TermostatController";
+const char* ssid = "Esp-thermostat";
 const char* password = "";
 
 // Temperature control variables
@@ -17,7 +17,6 @@ int hysteresis = 0;
 
 // Pin definitions
 const int HEATING_PIN = 15;
-const int COOLING_PIN = 12;
 #define ONE_WIRE_BUS 2
 
 // Relays are active LOW (LOW = ON, HIGH = OFF)
@@ -31,9 +30,7 @@ DallasTemperature sensors(&oneWire);
 // State
 bool automaticMode = false;
 bool heaterbtn = false;
-bool coolerbtn = false;
 bool heaterOn = false;
-bool coolerOn = false;
 
 const unsigned long CONTROL_INTERVAL_MS = 3000;
 unsigned long lastControl = 0;
@@ -52,7 +49,6 @@ dash::ToggleButtonCard autoMode(dashboard, "Auto Mode");
 dash::FeedbackCard modeStatus(dashboard, "Auto Mode Status");
 
 dash::ToggleButtonCard Heater(dashboard, "Heater");
-dash::ToggleButtonCard Cooler(dashboard, "Cooler");
 
 // Only touches the pin / logs when the state actually changes
 void setHeater(bool on) {
@@ -62,22 +58,17 @@ void setHeater(bool on) {
   Serial.println(on ? "Heater ON" : "Heater OFF");
 }
 
-void setCooler(bool on) {
-  if (on == coolerOn) return;
-  coolerOn = on;
-  digitalWrite(COOLING_PIN, on ? RELAY_ON : RELAY_OFF);
-  Serial.println(on ? "Cooler ON" : "Cooler OFF");
-}
-
 void updateModeStatus() {
-  if (automaticMode) modeStatus.setFeedback("Enabled", dash::Status::SUCCESS);
-  else               modeStatus.setFeedback("Disabled", dash::Status::WARNING);
+  if (automaticMode) {
+    modeStatus.setFeedback("Enabled", dash::Status::SUCCESS);
+  } else {
+    modeStatus.setFeedback("Disabled", dash::Status::WARNING);
+  }
 }
 
 // Applies manual button states (only when not in auto mode)
 void applyManual() {
   setHeater(heaterbtn);
-  setCooler(coolerbtn);
 }
 
 void setup() {
@@ -85,9 +76,7 @@ void setup() {
 
   // Set relays OFF before switching pins to output to avoid a glitch
   digitalWrite(HEATING_PIN, RELAY_OFF);
-  digitalWrite(COOLING_PIN, RELAY_OFF);
   pinMode(HEATING_PIN, OUTPUT);
-  pinMode(COOLING_PIN, OUTPUT);
 
   /* Access point */
   WiFi.mode(WIFI_AP);
@@ -96,7 +85,7 @@ void setup() {
   Serial.print("IP Address: ");
   Serial.println(WiFi.softAPIP());
 
-  dashboard.setAuthentication("admin", "1234");
+  dashboard.setAuthentication("esp", "thermostat");
 
   // Initial card values
   setTemp.setValue(setpoint);
@@ -105,7 +94,6 @@ void setup() {
   tempHyss.setValue(hysteresis);
   autoMode.setValue(automaticMode);
   Heater.setValue(heaterbtn);
-  Cooler.setValue(coolerbtn);
   updateModeStatus();
 
   // Callbacks are registered ONCE here, not in loop()
@@ -142,14 +130,6 @@ void setup() {
     dashboard.sendUpdates();
   });
 
-  Cooler.onChange([](int value) {
-    Serial.println("[Cooler] " + String(value ? "true" : "false"));
-    coolerbtn = value;
-    Cooler.setValue(value);
-    if (!automaticMode) applyManual();
-    dashboard.sendUpdates();
-  });
-
   server.begin();
   sensors.begin();
 }
@@ -165,7 +145,6 @@ void loop() {
   if (currentTemp == DEVICE_DISCONNECTED_C) {
     Serial.println("Sensor error! Turning outputs OFF");
     setHeater(false);
-    setCooler(false);
     return;
   }
 
@@ -174,13 +153,10 @@ void loop() {
   if (automaticMode) {
     if (currentTemp > setpoint + hysteresis) {
       setHeater(false);
-      setCooler(true);
     } else if (currentTemp < setpoint - hysteresis) {
       setHeater(true);
-      setCooler(false);
     } else {
       setHeater(false);
-      setCooler(false);
     }
   } else {
     applyManual();
