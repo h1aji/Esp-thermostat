@@ -213,6 +213,8 @@ void setup() {
   prefs.begin("thermostat");
   setpoint = prefs.getInt("setpoint", setpoint);
   hysteresis = prefs.getInt("hysteresis", hysteresis);
+  automaticMode = prefs.getBool("autoMode", automaticMode);
+  heaterbtn = prefs.getBool("heaterBtn", heaterbtn);
   wifiSsid = prefs.getString("wifi_ssid", "");
   wifiPassword = prefs.getString("wifi_pass", "");
 
@@ -276,6 +278,7 @@ void setup() {
   autoMode.onChange([](int value) {
     Serial.println("[autoMode] " + String(value ? "true" : "false"));
     automaticMode = value;
+    prefs.putBool("autoMode", automaticMode);
     autoMode.setValue(value);
     updateModeStatus();
     if (!automaticMode) applyManual();  // return to manual button states
@@ -285,6 +288,7 @@ void setup() {
   Heater.onChange([](int value) {
     Serial.println("[Heater] " + String(value ? "true" : "false"));
     heaterbtn = value;
+    prefs.putBool("heaterBtn", heaterbtn);
     Heater.setValue(value);
     if (!automaticMode) applyManual();
     dashboard.sendUpdates();
