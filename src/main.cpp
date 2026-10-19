@@ -104,6 +104,7 @@ bool connectToWiFi() {
   Serial.print("Connecting to WiFi SSID: ");
   Serial.println(wifiSsid);
   WiFi.mode(WIFI_STA);
+  WiFi.hostname(mdnsName);  // DHCP hostname (what the router shows), set after mode(), before begin()
   WiFi.begin(wifiSsid.c_str(), wifiPassword.c_str());
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && (millis() - start) < 15000) {
