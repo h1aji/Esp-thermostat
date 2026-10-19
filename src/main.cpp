@@ -5,6 +5,7 @@
 #include <DallasTemperature.h>
 
 #include <ESP8266WiFi.h>
+#include <ESP8266mDNS.h>
 #include <ESPAsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <Preferences.h>
@@ -13,6 +14,9 @@
 /* connect to the configured home WiFi network (or none is configured).  */
 const char* apSsid = "Esp-thermostat";
 const char* apPassword = "";
+
+// mDNS/OTA hostname: the device is reachable as "thermostat.local"
+const char* mdnsName = "thermostat";
 
 // Home WiFi network credentials, loaded from Preferences
 String wifiSsid;
@@ -230,8 +234,10 @@ void setup() {
     startAP();
   }
 
-  /* OTA (Over-The-Air) firmware updates */
-  ArduinoOTA.setHostname(apSsid);
+  /* OTA (Over-The-Air) firmware updates. ArduinoOTA.begin() also starts the */
+  /* mDNS responder (and ArduinoOTA.handle() keeps it updated), so the      */
+  /* device becomes reachable as "thermostat.local" as a side effect.      */
+  ArduinoOTA.setHostname(mdnsName);
   ArduinoOTA.onStart([]() {
     // Flashing pauses the main loop for several seconds; make sure the
     // heater relay isn't left on for the duration.
@@ -239,6 +245,7 @@ void setup() {
     Serial.println("OTA update starting");
   });
   ArduinoOTA.begin();
+  MDNS.addService("http", "tcp", 80);  // Advertise the web dashboard/settings pages
 
   dashboard.setAuthentication("esp", "thermostat");
 
