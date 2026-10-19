@@ -50,7 +50,12 @@ const unsigned long CONTROL_INTERVAL_MS = 3000;
 unsigned long lastControl = 0;
 
 AsyncWebServer server(80);
-ESPDash dashboard(server);
+// ESPDash's websocket is hardcoded to "/dashws" internally, regardless of the
+// uri given here, so only ONE ESPDash instance can ever work on a given
+// server. The dashboard therefore lives at "/overview"; "/" picks the right
+// page to send you to (see handleRoot below), and "/settings" is a plain
+// hand-built page since ESPDash has no text-input card.
+ESPDash dashboard(server, "/overview", true);
 
 dash::TemperatureCard temperature(dashboard, "Current Temperature", "°C");
 dash::TemperatureCard tempSet(dashboard, "Temperature Set Point", "°C");
@@ -63,8 +68,6 @@ dash::ToggleButtonCard autoMode(dashboard, "Auto Mode");
 dash::FeedbackCard modeStatus(dashboard, "Auto Mode Status");
 
 dash::ToggleButtonCard Heater(dashboard, "Heater");
-
-dash::FeedbackCard networkStatus(dashboard, "Network");
 
 // Only touches the pin / logs when the state actually changes
 void setHeater(bool on) {
@@ -108,7 +111,7 @@ bool connectToWiFi() {
 }
 
 // Fall back to our own Access Point so the device stays reachable and the
-// user can enter working WiFi credentials via the /wifi settings page.
+// user can enter working WiFi credentials via the /settings page.
 void startAP() {
   WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
@@ -117,15 +120,7 @@ void startAP() {
   Serial.println(WiFi.softAPIP());
 }
 
-void updateNetworkStatus() {
-  if (staConnected) {
-    networkStatus.setFeedback("Connected: " + WiFi.SSID() + " (" + WiFi.localIP().toString() + ")", dash::Status::SUCCESS);
-  } else {
-    networkStatus.setFeedback("AP fallback: " + String(apSsid) + " - configure at /wifi", dash::Status::WARNING);
-  }
-}
-
-// Minimal HTML-escaping for values reflected back into handleWifiPageGet's markup
+// Minimal HTML-escaping for values reflected back into handleSettingsPageGet's markup
 // (wifiSsid is user-controlled input, persisted and redisplayed on later page loads).
 String htmlEscape(const String& s) {
   String out;
@@ -143,9 +138,9 @@ String htmlEscape(const String& s) {
   return out;
 }
 
-// Serves a small standalone settings page (ESPDash has no text-input card)
+// Serves a small standalone Settings page (ESPDash has no text-input card)
 // for entering/changing the home WiFi SSID and password.
-void handleWifiPageGet(AsyncWebServerRequest* request) {
+void handleSettingsPageGet(AsyncWebServerRequest* request) {
   String status = staConnected
     ? ("Connected to <b>" + htmlEscape(WiFi.SSID()) + "</b>, IP " + WiFi.localIP().toString())
     : ("Running as Access Point <b>" + String(apSsid) + "</b> (could not connect to a WiFi network)");
@@ -153,13 +148,16 @@ void handleWifiPageGet(AsyncWebServerRequest* request) {
   String html =
     "<!DOCTYPE html><html><head><meta charset='utf-8'>"
     "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-    "<title>WiFi Settings</title>"
+    "<title>Settings</title>"
     "<style>body{font-family:sans-serif;max-width:400px;margin:40px auto;padding:0 16px}"
+    "nav a{margin-right:16px}"
     "label{display:block;margin-top:12px;font-weight:bold}"
     "input{width:100%;padding:8px;margin-top:4px;box-sizing:border-box}"
     "button{margin-top:20px;padding:10px 16px}"
     ".status{padding:10px;border-radius:4px;background:#eee}</style></head><body>"
-    "<h1>WiFi Settings</h1>"
+    "<nav><a href='/overview'>Overview</a><a href='/settings'>Settings</a></nav>"
+    "<h1>Settings</h1>"
+    "<h2>WiFi</h2>"
     "<div class='status'>" + status + "</div>"
     "<form id='f'>"
     "<label for='ssid'>SSID</label>"
@@ -175,7 +173,7 @@ void handleWifiPageGet(AsyncWebServerRequest* request) {
     "var data=new URLSearchParams();"
     "data.append('ssid', document.getElementById('ssid').value);"
     "data.append('password', document.getElementById('password').value);"
-    "fetch('/wifi',{method:'POST',body:data}).then(r=>r.text()).then(t=>{"
+    "fetch('/settings',{method:'POST',body:data}).then(r=>r.text()).then(t=>{"
     "document.getElementById('result').textContent=t;});"
     "});"
     "</script></body></html>";
@@ -183,7 +181,7 @@ void handleWifiPageGet(AsyncWebServerRequest* request) {
   request->send(200, "text/html", html);
 }
 
-void handleWifiPagePost(AsyncWebServerRequest* request) {
+void handleSettingsPagePost(AsyncWebServerRequest* request) {
   if (!request->hasParam("ssid", true) || request->getParam("ssid", true)->value().length() == 0) {
     request->send(400, "text/plain", "SSID is required");
     return;
@@ -195,6 +193,13 @@ void handleWifiPagePost(AsyncWebServerRequest* request) {
   request->send(200, "text/plain", "Saved. Restarting...");
   restartPending = true;
   restartAt = millis() + 1000;  // Give the async server time to flush the response
+}
+
+// "/" always exists, regardless of whether WiFi is set up yet, so it's the
+// one URL worth memorizing: it sends you to Settings when the device needs
+// attention, or the Overview dashboard once it's actually on the network.
+void handleRoot(AsyncWebServerRequest* request) {
+  request->redirect(staConnected ? "/overview" : "/settings");
 }
 
 void setup() {
@@ -213,7 +218,7 @@ void setup() {
 
   /* Connect to the configured home WiFi network; if that's not configured  */
   /* or fails, fall back to our own Access Point so the device is always   */
-  /* reachable and the settings can be fixed via the /wifi page.           */
+  /* reachable and the settings can be fixed via the /settings page.       */
   staConnected = connectToWiFi();
   if (staConnected) {
     Serial.print("Connected! IP address: ");
@@ -234,11 +239,11 @@ void setup() {
   ArduinoOTA.begin();
 
   dashboard.setAuthentication("esp", "thermostat");
-  updateNetworkStatus();
 
-  // WiFi settings page (SSID/password), separate from the ESPDash UI
-  server.on("/wifi", HTTP_GET, handleWifiPageGet);
-  server.on("/wifi", HTTP_POST, handleWifiPagePost);
+  // Pages: "/" routes to whichever of these actually matters right now
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/settings", HTTP_GET, handleSettingsPageGet);
+  server.on("/settings", HTTP_POST, handleSettingsPagePost);
 
   // Initial card values
   setTemp.setValue(setpoint);

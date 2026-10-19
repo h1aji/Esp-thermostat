@@ -39,7 +39,6 @@ and adjusted for the ESP12-F board with embedded relay from Aliexpress.
 
 ### Roadmap
 
- - Add WiFi AP in case if it cant connect
  - Add mDNS support
  - Add MQTT support
  - Setup OTA firmware update process
