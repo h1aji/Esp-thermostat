@@ -3,6 +3,7 @@
 #include <ESPDash.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <time.h>
 
 #include <ESP8266WiFi.h>
 #include <ESP8266mDNS.h>
@@ -14,6 +15,21 @@
 /* connect to the configured home WiFi network (or none is configured).  */
 const char* apSsid = "Esp-thermostat";
 const char* apPassword = "";
+
+// Hardcoded timezone: Istanbul (UTC+3, no DST since 2016).
+// Change this to match the device's location.
+const long TZ_OFFSET_SEC = 3 * 3600;
+const int DST_OFFSET_SEC = 0;
+const char* NTP_SERVER_1 = "pool.ntp.org";
+const char* NTP_SERVER_2 = "time.nist.gov";
+
+// Evening hours window: devices only heats within this local-time range.
+const int EVENING_HOURS_START = 17;  // 17:00
+const int EVENING_HOURS_END = 24;    // up to (not including) 24:00/midnight
+
+// An NTP timestamp below this is treated as "not synced yet" (this value
+// is well in the past relative to any real deployment).
+const time_t MIN_VALID_EPOCH = 1700000000;  // 2023-11-14
 
 // mDNS/OTA hostname: the device is reachable as "thermostat.local"
 const char* mdnsName = "thermostat";
@@ -51,6 +67,7 @@ DallasTemperature sensors(&oneWire);
 bool automaticMode = false;
 bool heaterbtn = false;
 bool heaterOn = false;
+bool eveningHoursMode = false;
 
 const unsigned long CONTROL_INTERVAL_MS = 3000;
 unsigned long lastControl = 0;
@@ -72,6 +89,8 @@ dash::SliderCard setHyss(dashboard, "Set Hysteresis", 0, 5, 1, "°C");
 
 dash::ToggleButtonCard autoMode(dashboard, "Auto Mode");
 dash::FeedbackCard modeStatus(dashboard, "Auto Mode Status");
+
+dash::ToggleButtonCard eveningHours(dashboard, "Evening Hours");
 
 dash::ToggleButtonCard Heater(dashboard, "Heater");
 
@@ -125,6 +144,27 @@ void startAP() {
   WiFi.softAP(apSsid, apPassword);
   Serial.print("AP IP Address: ");
   Serial.println(WiFi.softAPIP());
+}
+
+// True once NTP has actually set the clock (vs. the epoch default at boot)
+bool timeIsSynced() {
+  return time(nullptr) > MIN_VALID_EPOCH;
+}
+
+// Whether the current local time falls inside the configured evening window
+bool isWithinEveningHours() {
+  time_t now = time(nullptr);
+  struct tm* t = localtime(&now);
+  return t->tm_hour >= EVENING_HOURS_START && t->tm_hour < EVENING_HOURS_END;
+}
+
+String formatLocalTime() {
+  if (!timeIsSynced()) return "Not synced";
+  time_t now = time(nullptr);
+  struct tm* t = localtime(&now);
+  char buf[32];
+  strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", t);
+  return String(buf);
 }
 
 // Minimal HTML-escaping for values reflected back into handleSettingsPageGet's markup
@@ -239,6 +279,7 @@ void handleAboutPageGet(AsyncWebServerRequest* request) {
     "<table>"
     "<tr><td>Firmware built</td><td>" __DATE__ " " __TIME__ "</td></tr>"
     "<tr><td>Uptime</td><td>" + formatUptime() + "</td></tr>"
+    "<tr><td>Local time</td><td>" + formatLocalTime() + "</td></tr>"
     "<tr><td>Chip ID</td><td>" + String(chipId) + "</td></tr>"
     "</table>"
     "<p><a href='https://github.com/h1aji/Esp-thermostat' target='_blank'>Source on GitHub</a></p>"
@@ -300,6 +341,7 @@ void setup() {
   hysteresis = prefs.getInt("hysteresis", hysteresis);
   automaticMode = prefs.getBool("autoMode", automaticMode);
   heaterbtn = prefs.getBool("heaterBtn", heaterbtn);
+  eveningHoursMode = prefs.getBool("eveningMode", eveningHoursMode);
   wifiSsid = prefs.getString("wifi_ssid", "");
   wifiPassword = prefs.getString("wifi_pass", "");
 
@@ -310,6 +352,7 @@ void setup() {
   if (staConnected) {
     Serial.print("Connected! IP address: ");
     Serial.println(WiFi.localIP());
+    configTime(TZ_OFFSET_SEC, DST_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2);
   } else {
     Serial.println("Could not connect to WiFi, starting fallback AP");
     startAP();
@@ -343,6 +386,7 @@ void setup() {
   tempSet.setValue(setpoint);
   tempHyss.setValue(hysteresis);
   autoMode.setValue(automaticMode);
+  eveningHours.setValue(eveningHoursMode);
   Heater.setValue(heaterbtn);
   updateModeStatus();
 
@@ -372,6 +416,14 @@ void setup() {
     autoMode.setValue(value);
     updateModeStatus();
     if (!automaticMode) applyManual();  // return to manual button states
+    dashboard.sendUpdates();
+  });
+
+  eveningHours.onChange([](int value) {
+    Serial.println("[eveningHours] " + String(value ? "true" : "false"));
+    eveningHoursMode = value;
+    prefs.putBool("eveningMode", eveningHoursMode);
+    eveningHours.setValue(value);
     dashboard.sendUpdates();
   });
 
@@ -410,7 +462,12 @@ void loop() {
 
   temperature.setValue((int)round(currentTemp));
 
-  if (automaticMode) {
+  // Evening Hours restricts heating to the configured window, regardless of
+  // Auto Mode/manual button state. If NTP hasn't synced yet, the restriction
+  // is skipped (clock can't be trusted) so the device still heats normally.
+  if (eveningHoursMode && timeIsSynced() && !isWithinEveningHours()) {
+    setHeater(false);
+  } else if (automaticMode) {
     if (currentTemp > setpoint + hysteresis) {
       setHeater(false);
     } else if (currentTemp < setpoint - hysteresis) {
