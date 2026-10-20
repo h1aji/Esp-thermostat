@@ -34,11 +34,13 @@ bool restartPending = false;
 unsigned long restartAt = 0;
 
 // Pin definitions
+// GPIO is used to connect relay
 const int HEATING_PIN = 15;
+// Pin connected to DS18b20
 #define ONE_WIRE_BUS 2
 
 // Relays are active LOW (LOW = ON, HIGH = OFF)
-const int RELAY_ON = LOW;
+const int RELAY_ON  = LOW;
 const int RELAY_OFF = HIGH;
 
 // Temperature sensor
@@ -160,7 +162,7 @@ void handleSettingsPageGet(AsyncWebServerRequest* request) {
     "input{width:100%;padding:8px;margin-top:4px;box-sizing:border-box}"
     "button{margin-top:20px;padding:10px 16px}"
     ".status{padding:10px;border-radius:4px;background:#eee}</style></head><body>"
-    "<nav><a href='/overview'>Overview</a><a href='/settings'>Settings</a><a href='/about'>About</a></nav>"
+    "<nav><a href='/panel'>Overview</a><a href='/settings'>Settings</a><a href='/about'>About</a></nav>"
     "<h1>Settings</h1>"
     "<h2>WiFi</h2>"
     "<div class='status'>" + status + "</div>"
@@ -173,6 +175,9 @@ void handleSettingsPageGet(AsyncWebServerRequest* request) {
     "<button type='submit'>Save &amp; Restart</button>"
     "</form><p id='result'></p>"
     "<script>"
+    // Hide our own nav when embedded in the /panel shell's iframe, which
+    // already shows one outside the frame.
+    "if(window.self!==window.top){var n=document.querySelector('nav');if(n)n.style.display='none';}"
     "document.getElementById('f').addEventListener('submit', function(e){"
     "e.preventDefault();"
     "var data=new URLSearchParams();"
@@ -204,7 +209,7 @@ void handleSettingsPagePost(AsyncWebServerRequest* request) {
 // one URL worth memorizing: it sends you to Settings when the device needs
 // attention, or the Overview dashboard once it's actually on the network.
 void handleRoot(AsyncWebServerRequest* request) {
-  request->redirect(staConnected ? "/overview" : "/settings");
+  request->redirect(staConnected ? "/panel" : "/settings");
 }
 
 String formatUptime() {
@@ -228,7 +233,7 @@ void handleAboutPageGet(AsyncWebServerRequest* request) {
     "table{border-collapse:collapse;margin-top:12px}"
     "td{padding:4px 12px 4px 0;vertical-align:top}"
     "td:first-child{font-weight:bold;white-space:nowrap}</style></head><body>"
-    "<nav><a href='/overview'>Overview</a><a href='/settings'>Settings</a><a href='/about'>About</a></nav>"
+    "<nav><a href='/panel'>Overview</a><a href='/settings'>Settings</a><a href='/about'>About</a></nav>"
     "<h1>About</h1>"
     "<p><b>Esp-thermostat</b> &mdash; WiFi thermostat based on ESP8266 and a DS18B20 temperature sensor.</p>"
     "<table>"
@@ -238,7 +243,46 @@ void handleAboutPageGet(AsyncWebServerRequest* request) {
     "</table>"
     "<p><a href='https://github.com/h1aji/Esp-thermostat' target='_blank'>Source on GitHub</a></p>"
     "<p><a href='https://iotprojectsideas.com/temperature-control-with-esp8266-asyncwebserver/' target='_blank'>Original project article</a></p>"
+    // Hide our own nav when embedded in the /panel shell's iframe, which
+    // already shows one outside the frame.
+    "<script>if(window.self!==window.top){var n=document.querySelector('nav');if(n)n.style.display='none';}</script>"
     "</body></html>";
+
+  request->send(200, "text/html", html);
+}
+
+// A persistent nav bar (outside ESPDash's reach) with an iframe showing
+// whichever page is selected. ESPDash's OSS build has no multi-page/tab
+// support (that's a Pro-only "Tabs" feature), so this is the workaround:
+// Overview/Settings/About all stay reachable without touching ESPDash
+// internals or its gzip-compiled response.
+void handlePanelPageGet(AsyncWebServerRequest* request) {
+  String html =
+    "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+    "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+    "<title>Esp-thermostat</title>"
+    "<style>html,body{margin:0;height:100%;font-family:sans-serif}"
+    "nav{background:#222;padding:10px 16px}"
+    "nav a{color:#ccc;text-decoration:none;margin-right:20px;font-weight:bold;padding-bottom:4px}"
+    "nav a.active{color:#fff;border-bottom:2px solid #4caf50}"
+    "iframe{display:block;width:100%;height:calc(100vh - 42px);border:none}</style>"
+    "</head><body>"
+    "<nav id='nav'>"
+    "<a href='#' data-page='/overview'>Overview</a>"
+    "<a href='#' data-page='/settings'>Settings</a>"
+    "<a href='#' data-page='/about'>About</a>"
+    "</nav>"
+    "<iframe id='frame' src='/overview'></iframe>"
+    "<script>"
+    "var links=document.querySelectorAll('#nav a');"
+    "function setActive(page){links.forEach(function(a){a.classList.toggle('active',a.dataset.page===page);});}"
+    "links.forEach(function(a){a.addEventListener('click',function(e){"
+    "e.preventDefault();"
+    "document.getElementById('frame').src=a.dataset.page;"
+    "setActive(a.dataset.page);"
+    "});});"
+    "setActive('/overview');"
+    "</script></body></html>";
 
   request->send(200, "text/html", html);
 }
@@ -288,6 +332,7 @@ void setup() {
 
   // Pages: "/" routes to whichever of these actually matters right now
   server.on("/", HTTP_GET, handleRoot);
+  server.on("/panel", HTTP_GET, handlePanelPageGet);
   server.on("/settings", HTTP_GET, handleSettingsPageGet);
   server.on("/settings", HTTP_POST, handleSettingsPagePost);
   server.on("/about", HTTP_GET, handleAboutPageGet);
