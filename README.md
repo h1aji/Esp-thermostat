@@ -71,6 +71,12 @@ pio run -t upload    # flash over USB
 
 Once the device is on your network, firmware can be updated wirelessly instead of over USB: uncomment `upload_protocol = espota` in `platformio.ini` and set `upload_port` to the device's IP address or `thermostat.local`.
 
+### Screenshots
+
+<img src="./doc/mobile.jpg" height="500">
+
+
+
 ### Roadmap
 
  - Add MQTT support
