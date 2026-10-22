@@ -16,12 +16,16 @@
 const char* apSsid = "Esp-thermostat";
 const char* apPassword = "";
 
-// Hardcoded timezone: Istanbul (UTC+3, no DST since 2016).
-// Change this to match the device's location.
-const long TZ_OFFSET_SEC = 3 * 3600;
-const int DST_OFFSET_SEC = 0;
+// Default timezone/DST (hours), used until changed via the Settings page.
+const int DEFAULT_TZ_OFFSET_HOURS = 3;   // Istanbul, UTC+3
+const int DEFAULT_DST_OFFSET_HOURS = 0;  // Istanbul has not observed DST since 2016
 const char* NTP_SERVER_1 = "pool.ntp.org";
 const char* NTP_SERVER_2 = "time.nist.gov";
+
+// Current timezone/DST offsets (hours), loaded from Preferences and editable
+// at runtime via the /settings page.
+int tzOffsetHours = DEFAULT_TZ_OFFSET_HOURS;
+int dstOffsetHours = DEFAULT_DST_OFFSET_HOURS;
 
 // Evening hours window: devices only heats within this local-time range.
 const int EVENING_HOURS_START = 17;  // 17:00
@@ -146,6 +150,30 @@ void startAP() {
   Serial.println(WiFi.softAPIP());
 }
 
+// (Re-)applies the current timezone/DST offsets to the NTP client. Safe to
+// call anytime, including while already connected/synced.
+void applyTimeConfig() {
+  configTime((long)tzOffsetHours * 3600, dstOffsetHours * 3600, NTP_SERVER_1, NTP_SERVER_2);
+}
+
+String formatSignedHours(int h) {
+  return (h >= 0 ? "+" : "") + String(h);
+}
+
+// Parses a signed whole-hours offset like "+3" or "-8"; rejects anything else
+bool parseSignedHours(const String& s, int minVal, int maxVal, int& out) {
+  if (s.length() == 0 || s.length() > 3) return false;
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    bool isSign = (i == 0 && (c == '+' || c == '-'));
+    if (!isDigit(c) && !isSign) return false;
+  }
+  int v = s.toInt();
+  if (v < minVal || v > maxVal) return false;
+  out = v;
+  return true;
+}
+
 // True once NTP has actually set the clock (vs. the epoch default at boot)
 bool timeIsSynced() {
   return time(nullptr) > MIN_VALID_EPOCH;
@@ -214,6 +242,14 @@ void handleSettingsPageGet(AsyncWebServerRequest* request) {
     "<p><small>Leave password blank for an open network.</small></p>"
     "<button type='submit'>Save &amp; Restart</button>"
     "</form><p id='result'></p>"
+    "<h2>Time</h2>"
+    "<form id='tf'>"
+    "<label for='tz'>Timezone offset (hours, e.g. +3, -8)</label>"
+    "<input type='text' id='tz' name='tz' value='" + formatSignedHours(tzOffsetHours) + "' pattern='^[+-]?\\d{1,2}$' required>"
+    "<label for='dst'>DST offset (hours, e.g. +1, 0)</label>"
+    "<input type='text' id='dst' name='dst' value='" + formatSignedHours(dstOffsetHours) + "' pattern='^[+-]?\\d{1,2}$' required>"
+    "<button type='submit'>Save &amp; Apply</button>"
+    "</form><p id='timeResult'></p>"
     "<script>"
     // Hide our own nav when embedded in the /panel shell's iframe, which
     // already shows one outside the frame.
@@ -225,6 +261,14 @@ void handleSettingsPageGet(AsyncWebServerRequest* request) {
     "data.append('password', document.getElementById('password').value);"
     "fetch('/settings',{method:'POST',body:data}).then(r=>r.text()).then(t=>{"
     "document.getElementById('result').textContent=t;});"
+    "});"
+    "document.getElementById('tf').addEventListener('submit', function(e){"
+    "e.preventDefault();"
+    "var data=new URLSearchParams();"
+    "data.append('tz', document.getElementById('tz').value);"
+    "data.append('dst', document.getElementById('dst').value);"
+    "fetch('/settings/time',{method:'POST',body:data}).then(r=>r.text()).then(t=>{"
+    "document.getElementById('timeResult').textContent=t;});"
     "});"
     "</script></body></html>";
 
@@ -243,6 +287,29 @@ void handleSettingsPagePost(AsyncWebServerRequest* request) {
   request->send(200, "text/plain", "Saved. Restarting...");
   restartPending = true;
   restartAt = millis() + 1000;  // Give the async server time to flush the response
+}
+
+// Saves and immediately applies the timezone/DST offsets, no restart needed.
+void handleTimeSettingsPost(AsyncWebServerRequest* request) {
+  if (!request->hasParam("tz", true) || !request->hasParam("dst", true)) {
+    request->send(400, "text/plain", "tz and dst are required");
+    return;
+  }
+  int tz, dst;
+  if (!parseSignedHours(request->getParam("tz", true)->value(), -12, 14, tz)) {
+    request->send(400, "text/plain", "Invalid timezone offset (expected e.g. +3 or -8, range -12..14)");
+    return;
+  }
+  if (!parseSignedHours(request->getParam("dst", true)->value(), -2, 2, dst)) {
+    request->send(400, "text/plain", "Invalid DST offset (expected e.g. +1 or 0, range -2..2)");
+    return;
+  }
+  tzOffsetHours = tz;
+  dstOffsetHours = dst;
+  prefs.putInt("tz_offset_h", tzOffsetHours);
+  prefs.putInt("dst_offset_h", dstOffsetHours);
+  if (staConnected) applyTimeConfig();  // re-sync with the new offsets right away
+  request->send(200, "text/plain", "Time settings saved and applied.");
 }
 
 // "/" always exists, regardless of whether WiFi is set up yet, so it's the
@@ -342,6 +409,8 @@ void setup() {
   automaticMode = prefs.getBool("autoMode", automaticMode);
   heaterbtn = prefs.getBool("heaterBtn", heaterbtn);
   eveningHoursMode = prefs.getBool("eveningMode", eveningHoursMode);
+  tzOffsetHours = prefs.getInt("tz_offset_h", tzOffsetHours);
+  dstOffsetHours = prefs.getInt("dst_offset_h", dstOffsetHours);
   wifiSsid = prefs.getString("wifi_ssid", "");
   wifiPassword = prefs.getString("wifi_pass", "");
 
@@ -352,7 +421,7 @@ void setup() {
   if (staConnected) {
     Serial.print("Connected! IP address: ");
     Serial.println(WiFi.localIP());
-    configTime(TZ_OFFSET_SEC, DST_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2);
+    applyTimeConfig();
   } else {
     Serial.println("Could not connect to WiFi, starting fallback AP");
     startAP();
@@ -378,6 +447,7 @@ void setup() {
   server.on("/panel", HTTP_GET, handlePanelPageGet);
   server.on("/settings", HTTP_GET, handleSettingsPageGet);
   server.on("/settings", HTTP_POST, handleSettingsPagePost);
+  server.on("/settings/time", HTTP_POST, handleTimeSettingsPost);
   server.on("/about", HTTP_GET, handleAboutPageGet);
 
   // Initial card values
