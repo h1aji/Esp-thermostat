@@ -16,16 +16,18 @@
 const char* apSsid = "Esp-thermostat";
 const char* apPassword = "";
 
-// Default timezone/DST (hours), used until changed via the Settings page.
+// Default timezone/DST/NTP settings, used until changed via the Settings page.
 const int DEFAULT_TZ_OFFSET_HOURS = 3;   // Istanbul, UTC+3
 const int DEFAULT_DST_OFFSET_HOURS = 0;  // Istanbul has not observed DST since 2016
-const char* NTP_SERVER_1 = "pool.ntp.org";
-const char* NTP_SERVER_2 = "time.nist.gov";
+const char* DEFAULT_NTP_SERVER_1 = "pool.ntp.org";
+const char* DEFAULT_NTP_SERVER_2 = "time.nist.gov";
 
-// Current timezone/DST offsets (hours), loaded from Preferences and editable
-// at runtime via the /settings page.
+// Current timezone/DST/NTP settings, loaded from Preferences and editable at
+// runtime via the /settings page.
 int tzOffsetHours = DEFAULT_TZ_OFFSET_HOURS;
 int dstOffsetHours = DEFAULT_DST_OFFSET_HOURS;
+String ntpServer1 = DEFAULT_NTP_SERVER_1;
+String ntpServer2 = DEFAULT_NTP_SERVER_2;
 
 // Evening hours window: devices only heats within this local-time range.
 const int EVENING_HOURS_START = 17;  // 17:00
@@ -153,7 +155,7 @@ void startAP() {
 // (Re-)applies the current timezone/DST offsets to the NTP client. Safe to
 // call anytime, including while already connected/synced.
 void applyTimeConfig() {
-  configTime((long)tzOffsetHours * 3600, dstOffsetHours * 3600, NTP_SERVER_1, NTP_SERVER_2);
+  configTime((long)tzOffsetHours * 3600, dstOffsetHours * 3600, ntpServer1.c_str(), ntpServer2.c_str());
 }
 
 String formatSignedHours(int h) {
@@ -248,6 +250,10 @@ void handleSettingsPageGet(AsyncWebServerRequest* request) {
     "<input type='text' id='tz' name='tz' value='" + formatSignedHours(tzOffsetHours) + "' pattern='^[+-]?\\d{1,2}$' required>"
     "<label for='dst'>DST offset (hours, e.g. +1, 0)</label>"
     "<input type='text' id='dst' name='dst' value='" + formatSignedHours(dstOffsetHours) + "' pattern='^[+-]?\\d{1,2}$' required>"
+    "<label for='ntp1'>NTP Server 1 (optional)</label>"
+    "<input type='text' id='ntp1' name='ntp1' value='" + htmlEscape(ntpServer1) + "' placeholder='" + DEFAULT_NTP_SERVER_1 + "'>"
+    "<label for='ntp2'>NTP Server 2 (optional)</label>"
+    "<input type='text' id='ntp2' name='ntp2' value='" + htmlEscape(ntpServer2) + "' placeholder='" + DEFAULT_NTP_SERVER_2 + "'>"
     "<button type='submit'>Save &amp; Apply</button>"
     "</form><p id='timeResult'></p>"
     "<script>"
@@ -267,6 +273,8 @@ void handleSettingsPageGet(AsyncWebServerRequest* request) {
     "var data=new URLSearchParams();"
     "data.append('tz', document.getElementById('tz').value);"
     "data.append('dst', document.getElementById('dst').value);"
+    "data.append('ntp1', document.getElementById('ntp1').value);"
+    "data.append('ntp2', document.getElementById('ntp2').value);"
     "fetch('/settings/time',{method:'POST',body:data}).then(r=>r.text()).then(t=>{"
     "document.getElementById('timeResult').textContent=t;});"
     "});"
@@ -304,11 +312,26 @@ void handleTimeSettingsPost(AsyncWebServerRequest* request) {
     request->send(400, "text/plain", "Invalid DST offset (expected e.g. +1 or 0, range -2..2)");
     return;
   }
+  String ntp1 = request->hasParam("ntp1", true) ? request->getParam("ntp1", true)->value() : "";
+  String ntp2 = request->hasParam("ntp2", true) ? request->getParam("ntp2", true)->value() : "";
+  ntp1.trim();
+  ntp2.trim();
+  if (ntp1.length() > 63 || ntp2.length() > 63) {
+    request->send(400, "text/plain", "NTP server hostname too long");
+    return;
+  }
+  if (ntp1.length() == 0) ntp1 = DEFAULT_NTP_SERVER_1;
+  if (ntp2.length() == 0) ntp2 = DEFAULT_NTP_SERVER_2;
+
   tzOffsetHours = tz;
   dstOffsetHours = dst;
+  ntpServer1 = ntp1;
+  ntpServer2 = ntp2;
   prefs.putInt("tz_offset_h", tzOffsetHours);
   prefs.putInt("dst_offset_h", dstOffsetHours);
-  if (staConnected) applyTimeConfig();  // re-sync with the new offsets right away
+  prefs.putString("ntp1", ntpServer1);
+  prefs.putString("ntp2", ntpServer2);
+  if (staConnected) applyTimeConfig();  // re-sync with the new settings right away
   request->send(200, "text/plain", "Time settings saved and applied.");
 }
 
@@ -411,6 +434,8 @@ void setup() {
   eveningHoursMode = prefs.getBool("eveningMode", eveningHoursMode);
   tzOffsetHours = prefs.getInt("tz_offset_h", tzOffsetHours);
   dstOffsetHours = prefs.getInt("dst_offset_h", dstOffsetHours);
+  ntpServer1 = prefs.getString("ntp1", ntpServer1);
+  ntpServer2 = prefs.getString("ntp2", ntpServer2);
   wifiSsid = prefs.getString("wifi_ssid", "");
   wifiPassword = prefs.getString("wifi_pass", "");
 
